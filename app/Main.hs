@@ -3,50 +3,47 @@ module Main where
 import Ir
 import qualified Data.Text as T
 import qualified Data.Map as Map
+import Control.Monad.State
+import ClosureConversion
 -- register spilling
 -- abstract instruction generation
 -- assembly
-symA = Symbol "a" 0
-symB = Symbol "b" 0
-symC = Symbol "c" 0
-symD = Symbol "d" 0
-symF = Symbol "f" 0
-symCont = Symbol "k" 0
 
--- Define a lambda with free variables
-lambdaWithFreeVar = Lambda {
-    l_args = [symA, symB],
-    l_cont = symCont,
-    l_body = UCall {
-        uc_func = UVar symF,
-        uc_args = [UVar symA, UVar symB],
-        uc_cont = KVar symCont
-    }
-}
-
-lambdaClosure = Lambda {
-    l_args = [symC],
-    l_cont = symCont,
-    l_body = UCall {
-        uc_func = ULambda (Lambda {
-            l_args = [symD],
-            l_cont = symCont,
-            l_body = UCall {
-                uc_func = UVar $ Symbol "foo" 0,
-                uc_args = [UVar symC, UVar symD],
-                uc_cont = KVar symCont
-            }
-        }),
-        uc_args = [ULambda lambdaWithFreeVar],
-        uc_cont = KVar symCont
-    }
-}
-
--- Define the module
-moduleClosureConversion = Module {
+exMod :: Module
+exMod = Module {
     m_funcs = Map.fromList [
-        (Symbol "baz" 0, lambdaClosure)
+        (Symbol "baz" 0, bazDef)
     ]
 }
+    where
+    symA = Symbol "a" 0
+    symB = Symbol "b" 0
+    symC = Symbol "c" 0
+    symD = Symbol "d" 0
+    symF = Symbol "f" 0
+    symCont = Symbol "k" 0
+
+    bazDef = Lambda {
+        l_args = [
+            Binding symA TyInt,
+            Binding symF $ TyFn [TyFn [TyInt] (TyCont $ Just TyInt)
+, TyInt] (TyCont $ Just TyInt)
+        ],
+        l_cont = Binding symCont (TyCont $ Just TyInt),
+        l_body = UCall {
+            uc_func = UVar symF,
+            uc_args = [ULambda Lambda {
+                l_args = [Binding symB TyInt],
+                l_cont = Binding symCont (TyCont $ Just TyInt),
+                l_body = KCall { kc_cont = KVar symCont, kc_arg = UVar symA }
+            }, UVar symA],
+            uc_cont = KVar symCont
+        }
+    }
+
+cloCovMod :: Module
+cloCovMod = evalState (convertClosures exMod) 1
+
+
 main :: IO ()
 main = putStrLn "Hello, Haskell!"

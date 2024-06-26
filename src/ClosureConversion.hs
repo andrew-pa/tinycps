@@ -5,6 +5,9 @@ import qualified Data.Map as Map
 import Control.Applicative
 import Control.Monad.Writer
 import qualified Data.Set as Set
+import Control.Monad.Reader
+import Data.Map ((!))
+import Data.Functor ((<&>))
 
 -- | Make explicit all closures from a module.
 -- Every ULambda generates a top-level function that accepts a record as its first argument.
@@ -21,30 +24,33 @@ mapMWithKey :: Monad m => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapMWithKey f = unwrapMonad . Map.traverseWithKey (\k a -> WrapMonad (f k a))
 
 convertClosures m = do
-    (a, b) <- runWriterT $ mapMWithKey closureConvert (m_funcs m)
+    (a, b) <- runWriterT $ mapM closureConvert (m_funcs m)
     return Module {
         m_funcs = Map.union a b
     }
     where
-    closureConvert :: Symbol -> Lambda -> WriterT (Map.Map Symbol Lambda) GenIdState Lambda
-    closureConvert _ = convertLambda Set.empty
+    closureConvert :: Lambda -> (WriterT (Map.Map Symbol Lambda) GenIdState) Lambda
+    closureConvert lam = runReaderT (convertLambda Set.empty lam) Map.empty
         where
-            convertLambda freeVars  Lambda {l_args, l_cont, l_body} = do
-                cloRecordName <- lift $ uniqueSym "$clo"
-                body <- convertExpr l_body
+            convertLambda :: Set.Set Symbol -> Lambda -> ReaderT (Map.Map Symbol UType) (WriterT (Map.Map Symbol Lambda) GenIdState) Lambda
+            convertLambda freeVars lam@Lambda {l_args, l_cont, l_body} = do
+                cloRecordName <- lift $ lift $ uniqueSym "$clo"
+                body <- local (Map.union (Map.fromList $ map (\(Binding n ty) -> (n,ty)) l_args)) $ convertExpr l_body
+                cloRecordTy <- mapM (\n -> reader (\e -> (n, e ! n))) (Set.toList freeVars)
+                    <&> Map.fromList . ((fnFieldName, lambdaType lam) :)
                 let new_body = foldl (\inner var -> Select {
                     sl_record = UVar cloRecordName,
                     sl_field = var,
-                    sl_cont = KLambda { kl_arg = Just var, kl_body = inner }
+                    sl_cont = KLambda { kl_arg = Just (Binding var (cloRecordTy ! var)), kl_body = inner }
                 }) body freeVars
                 return Lambda {
-                    l_args = cloRecordName : l_args,
+                    l_args = Binding cloRecordName (TyRecord cloRecordTy) : l_args,
                     l_cont = l_cont,
                     l_body = new_body
                 }
 
             convertUTerm (ULambda l) = do
-                fnName <- lift $ uniqueSym "@lambda"
+                fnName <- lift $ lift $ uniqueSym "@lambda"
                 let freeVars = freeVariables l
                 newLam <- convertLambda freeVars l
                 tell $ Map.singleton fnName newLam
@@ -55,20 +61,21 @@ convertClosures m = do
             convertUTerm u = return u
 
             convertKTerm KLambda { kl_arg, kl_body } = do
-                body <- convertExpr kl_body
+                body <- local (maybe id (\(Binding n ty) -> Map.insert n ty) kl_arg) $ convertExpr kl_body
                 return KLambda { kl_arg = kl_arg, kl_body = body }
             convertKTerm k = return k
 
             convertExpr UCall { uc_func, uc_args, uc_cont } = do
-                fnTemp <- lift $ uniqueSym "$f"
+                fnTemp <- lift $ lift $ uniqueSym "$f"
                 func <- convertUTerm uc_func
+                funcTy <- utermType uc_func
                 args <- mapM convertUTerm uc_args
                 cont <- convertKTerm uc_cont
                 return $ simplify Select {
                     sl_field = fnFieldName,
                     sl_record = func,
                     sl_cont = KLambda {
-                        kl_arg = Just fnTemp,
+                        kl_arg = Just $ Binding fnTemp funcTy,
                         kl_body = UCall {
                             uc_func = UVar fnTemp,
                             uc_args = func : args,
