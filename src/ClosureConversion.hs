@@ -35,7 +35,7 @@ convertClosures m = do
                 let new_body = foldl (\inner var -> Select {
                     sl_record = UVar cloRecordName,
                     sl_field = var,
-                    sl_cont = KLambda { kl_arg = var, kl_body = inner }
+                    sl_cont = KLambda { kl_arg = Just var, kl_body = inner }
                 }) body freeVars
                 return Lambda {
                     l_args = cloRecordName : l_args,
@@ -68,7 +68,7 @@ convertClosures m = do
                     sl_field = fnFieldName,
                     sl_record = func,
                     sl_cont = KLambda {
-                        kl_arg = fnTemp,
+                        kl_arg = Just fnTemp,
                         kl_body = UCall {
                             uc_func = UVar fnTemp,
                             uc_args = func : args,
@@ -76,7 +76,7 @@ convertClosures m = do
                         }
                     }
                 }
-            convertExpr KCall {kc_cont, kc_arg}= do
+            convertExpr KCall {kc_cont, kc_arg} = do
                 cont <- convertKTerm kc_cont
                 arg <- convertUTerm kc_arg
                 return KCall {kc_cont=cont, kc_arg=arg}
@@ -84,5 +84,10 @@ convertClosures m = do
                 record <- convertUTerm sl_record
                 cont <- convertKTerm sl_cont
                 return Select { sl_field=sl_field, sl_record=record, sl_cont=cont }
+            convertExpr If {if_test, if_csq, if_alt} = do
+                test <- convertUTerm if_test
+                csq <- convertKTerm if_csq
+                alt <- convertKTerm if_alt
+                return If{if_test=test,if_csq=csq,if_alt=alt}
 
 

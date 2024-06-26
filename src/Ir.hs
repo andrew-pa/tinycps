@@ -1,11 +1,8 @@
 module Ir where
 import qualified Data.Text as T
 import qualified Data.Map as Map
-import Control.Applicative
-import Control.Monad.Writer
 import Control.Monad.State
 import qualified Data.Set as Set
-import Data.Foldable (foldlM)
 import Control.Monad.Reader (runReader, reader, MonadReader (local), Reader)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe)
@@ -44,7 +41,7 @@ instance Show UTerm where
 data KTerm =
     KVar Symbol
     | KLambda {
-        kl_arg :: Symbol,
+        kl_arg :: Maybe Symbol,
         kl_body :: Expr
     }
     deriving (Eq)
@@ -68,6 +65,11 @@ data Expr =
         sl_record :: UTerm,
         sl_cont :: KTerm
     }
+    | If {
+        if_test :: UTerm,
+        if_csq  :: KTerm,
+        if_alt  :: KTerm
+    }
     deriving (Eq)
 
 instance Show Expr where
@@ -77,6 +79,8 @@ instance Show Expr where
         show cont ++ "← (" ++ show arg ++ ")"
     show (Select field record cont) =
         show record ++ "." ++ show field ++ " ⟶ " ++ show cont
+    show (If tst csq alt) =
+        "if " ++ show tst ++ " then " ++ show csq ++ " else " ++ show alt
 
 newtype Module = Module {
     m_funcs :: Map.Map Symbol Lambda
@@ -95,7 +99,8 @@ freeVariables Lambda {l_args, l_cont, l_body} =
     freeInKTerm (KVar v) = do
         bound <- reader $ Set.member v
         return (if bound then Set.empty else Set.singleton v)
-    freeInKTerm KLambda { kl_arg, kl_body } = local (Set.insert kl_arg) (freeInExpr kl_body)
+    freeInKTerm KLambda { kl_arg = Just argName, kl_body } = local (Set.insert argName) (freeInExpr kl_body)
+    freeInKTerm KLambda { kl_arg = Nothing, kl_body } = freeInExpr kl_body
 
     freeInUTerm :: UTerm -> Reader (Set.Set Symbol) (Set.Set Symbol)
     freeInUTerm (UVar v) = do
@@ -118,6 +123,11 @@ freeVariables Lambda {l_args, l_cont, l_body} =
         freeInCont <- freeInKTerm sl_cont
         freeInArg <- freeInUTerm sl_record
         return (Set.union freeInCont freeInArg)
+    freeInExpr If { if_test, if_csq, if_alt } = do
+        freeInTest <- freeInUTerm if_test
+        freeInCsq <- freeInKTerm if_csq
+        freeInAlt <- freeInKTerm if_alt
+        return (Set.unions [freeInTest, freeInCsq, freeInAlt])
 
 substInExprU :: Expr -> Reader (Symbol -> Maybe UTerm) Expr
 substInExprK :: Expr -> Reader (Symbol -> Maybe KTerm) Expr
@@ -137,6 +147,11 @@ mapTermsInExpr substInUTerm substInKTerm e = case e of
         record <- substInUTerm sl_record
         cont <- substInKTerm sl_cont
         return Select{sl_field=sl_field,sl_record=record,sl_cont=cont}
+    If{if_test,if_csq,if_alt} -> do
+        test <- substInUTerm if_test
+        csq  <- substInKTerm if_csq
+        alt  <- substInKTerm if_alt
+        return If{if_test=test,if_csq=csq,if_alt=alt}
 
 substInExprU = mapTermsInExpr substInUTerm substInKTerm
     where
@@ -179,10 +194,15 @@ mapToFn = flip Map.lookup
 simplify :: Expr -> Expr
 simplify UCall { uc_func = (ULambda Lambda { l_args, l_cont, l_body }), uc_args, uc_cont } =
     runReader (substInExprK (runReader (substInExprU l_body) (mapToFn $ Map.fromList $ zip l_args uc_args))) (mapToFn $ Map.singleton l_cont uc_cont)
-simplify KCall { kc_cont = (KLambda { kl_arg, kl_body }), kc_arg } =
-    runReader (substInExprU kl_body) (mapToFn $ Map.singleton kl_arg kc_arg)
-simplify Select { sl_field, sl_record = LiRecord fields, sl_cont = KLambda { kl_arg, kl_body } }
-    | Map.member sl_field fields = runReader (substInExprU kl_body) (mapToFn $ Map.singleton kl_arg $ fields Map.! sl_field)
+simplify KCall { kc_cont = (KLambda { kl_arg = Just argName, kl_body }), kc_arg } =
+    runReader (substInExprU kl_body) (mapToFn $ Map.singleton argName kc_arg)
+simplify Select { sl_field, sl_record = LiRecord fields, sl_cont = KLambda { kl_arg = Just argName, kl_body } }
+    | Map.member sl_field fields = runReader (substInExprU kl_body) (mapToFn $ Map.singleton argName $ fields Map.! sl_field)
+-- so long as we have no side-effects
+simplify UCall { uc_func = _, uc_args = _, uc_cont = KLambda { kl_arg = Nothing, kl_body } } =
+    kl_body
+simplify Select { sl_field = _, sl_record = _, sl_cont = KLambda { kl_arg = Nothing, kl_body } } =
+    kl_body
 simplify e = e
 
 
