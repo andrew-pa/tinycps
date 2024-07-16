@@ -2,15 +2,15 @@
 
 module ClosureConversion where
 
-import Control.Applicative()
+import Control.Applicative ()
 import Control.Monad.Reader
 import Control.Monad.Writer
 import Data.Functor ((<&>))
 import qualified Data.Map as Map
 import Data.Map ((!))
 import qualified Data.Set as Set
+import Ext ()
 import Ir
-import Ext()
 
 -- | Make explicit all closures from a module.
 -- Every ULambda generates a top-level function that accepts a record as its first argument.

@@ -13,16 +13,16 @@ import qualified Data.Text as T
 showPair :: Show a => Show b => (a, b) -> String
 showPair (k, v) = show k ++ ": " ++ show v
 
-data Symbol =
-    Symbol T.Text Int
+newtype Symbol =
+    Symbol T.Text
     deriving (Eq, Ord)
 
 instance Show Symbol where
-    show (Symbol text int) = T.unpack text ++ show int
+    show (Symbol s) = show s
 
 data UType
     = TyInt
-    | TyRecord (Map.Map Symbol UType)
+    | TyRecord (Map.Map T.Text UType)
     | TyFn [UType] KType
     deriving (Eq)
 
@@ -69,17 +69,17 @@ instance Show Lambda where
 data UTerm
     = UVar Symbol
     | LiInt Int
-    | LiRecord (Map.Map Symbol UTerm)
+    | LiRecord (Map.Map T.Text UTerm)
     | ULambda Lambda
     deriving (Eq)
 
-utermType :: (Monad m) => UTerm -> ReaderT (Map.Map Symbol UType) m UType
-utermType (UVar v) = reader (! v)
-utermType (LiInt _) = return TyInt
-utermType (LiRecord fields) = do
-    fieldTypes <- mapM utermType fields
+utermType :: (Monad m) => (Symbol -> e -> UType) -> UTerm -> ReaderT e m UType
+utermType p (UVar v) = reader (p v)
+utermType _ (LiInt _) = return TyInt
+utermType p (LiRecord fields) = do
+    fieldTypes <- mapM (utermType p) fields
     return $ TyRecord fieldTypes
-utermType (ULambda lam) = return $ lambdaType lam
+utermType _ (ULambda lam) = return $ lambdaType lam
 
 instance Show UTerm where
     show (UVar sym) = show sym
@@ -111,7 +111,7 @@ data Expr
           , kc_arg :: UTerm
           }
     | Select
-          { sl_field :: Symbol
+          { sl_field :: T.Text
           , sl_record :: UTerm
           , sl_cont :: KTerm
           }
@@ -263,11 +263,3 @@ simplify UCall {uc_func = _, uc_args = _, uc_cont = KLambda {kl_arg = Nothing, k
 simplify Select {sl_field = _, sl_record = _, sl_cont = KLambda {kl_arg = Nothing, kl_body}} =
     kl_body
 simplify e = e
-
-type GenIdState = State Int
-
-uniqueSym :: String -> GenIdState Symbol
-uniqueSym s = do
-    i <- get
-    put $ i + 1
-    return (Symbol (T.pack s) i)
