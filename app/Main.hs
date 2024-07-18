@@ -6,6 +6,7 @@ import Control.Monad.State
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import Ir
+import qualified XIr
 import ClosureConversion
 import CodeGen
 import qualified Data.Set as Set
@@ -14,14 +15,14 @@ import qualified Data.Set as Set
 -- abstract instruction generation
 -- assembly
 exMod :: Module
-exMod = Module {m_funcs = Map.fromList [(Symbol "baz" 0, bazDef)]}
+exMod = Module {m_funcs = Map.fromList [(Symbol "baz", bazDef)]}
   where
-    symA = Symbol "a" 0
-    symB = Symbol "b" 0
-    symC = Symbol "c" 0
-    symD = Symbol "d" 0
-    symF = Symbol "f" 0
-    symCont = Symbol "k" 0
+    symA = Symbol "a"
+    symB = Symbol "b"
+    symC = Symbol "c"
+    symD = Symbol "d"
+    symF = Symbol "f"
+    symCont = Symbol "k"
     bazDef =
         Lambda
             { l_args =
@@ -46,8 +47,11 @@ exMod = Module {m_funcs = Map.fromList [(Symbol "baz" 0, bazDef)]}
                       }
             }
 
-cloCovMod :: Module
-cloCovMod = evalState (convertClosures exMod) 1
+exModX :: XIr.Module
+exModX = XIr.runPreprocess $ XIr.preprocess exMod
+
+cloCovMod :: XIr.Module
+cloCovMod = evalState (convertClosures exModX) 1
 
 testMachine :: MachineDesc
 testMachine = MachineDesc {
@@ -59,8 +63,8 @@ testMachine = MachineDesc {
     numRegisters=16
 }
 
-genMod :: Map.Map Symbol [Instr]
-genMod = codeGen testMachine cloCovMod
+-- genMod :: Map.Map Symbol [Instr]
+-- genMod = codeGen testMachine cloCovMod
 
 main :: IO ()
 main = putStrLn "Hello, Haskell!"

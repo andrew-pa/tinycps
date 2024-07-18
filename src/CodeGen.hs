@@ -2,15 +2,12 @@
 
 module CodeGen where
 
-import Control.Monad.Reader (MonadReader(..), ReaderT(ReaderT, runReaderT))
 import Control.Monad.State
 import Control.Monad.Writer
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (isNothing)
 import qualified Data.Set as Set
-import qualified Data.Text as T
-import Debug.Trace
-import Ext (filterMaybe, localState, localStateWithContext, mapMWithKey)
+import Ext (localState, localStateWithContext)
 import Ir
 
 -- CPS to instructions
@@ -37,6 +34,11 @@ reserveTemporary (VarAssign assigned free) =
 
 lookupAssignment :: Symbol -> VarAssignment -> Maybe Register
 lookupAssignment s (VarAssign assigned _) = Map.lookup s assigned
+
+swapAssignment :: Symbol -> Register -> VarAssignment -> Writer [Instr] VarAssignment
+-- Ensure that previously assigned `s` is now assigned the register `r`. If `r` is in use, the variable using `r` will now use the register previously assigned to `s`.
+-- To do so, it may be necessary to emit some instructions to manipulate the registers.
+swapAssignment s r = error "TODO"
 
 -- makeArgumentRegistersAvailable :: Set.Set Register -> Set.Set Symbol -> GenM VarAssignment
 -- makeArgumentRegistersAvailable requiredArgumentRegisters retainedVariables = do

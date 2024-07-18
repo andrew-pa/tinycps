@@ -32,3 +32,11 @@ localState f k =
 
 mapMWithKey :: Monad m => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapMWithKey f = unwrapMonad . Map.traverseWithKey (\k a -> WrapMonad (f k a))
+
+type GenIdState = State Int
+
+incrSymCounter :: Monad m => (StateT Int m) Int
+incrSymCounter = do
+    i <- get
+    put $ i + 1
+    return i
