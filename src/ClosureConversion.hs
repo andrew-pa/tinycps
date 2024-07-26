@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 
 module ClosureConversion where
 
@@ -70,18 +71,28 @@ convertClosures m = do
         convertKTerm k = return k
         convertExpr (Literal (ULambda lam) lifetime cont) = do
             fnName <- lift $ lift $ uniqueSym "@lambda"
+            fnTmpName <- lift $ lift $ uniqueSym "tmp"
             let freeVars = freeVariables lam
             newLam <- convertLambda freeVars lam
             tell $ Map.singleton fnName newLam
             let record =
-                    (fnFieldName, UVar fnName)
+                    (fnFieldName, UVar fnTmpName)
                         : map (\v@(Symbol vName _) -> (vName, UVar v)) (Set.toList freeVars)
+            let fnTy = lambdaType lam
             k <- convertKTerm cont
+            let createRecordE =
+                    Literal
+                        { lt_val = LiRecord . Map.fromList $ record
+                        , lt_lifetime = lifetime
+                        , lt_cont = k
+                        }
             return
                 $ Literal
-                      { lt_val = LiRecord . Map.fromList $ record
-                      , lt_lifetime = lifetime
-                      , lt_cont = k
+                      { lt_val = TopLevelRef fnName
+                      , lt_lifetime = Immediate
+                      , lt_cont =
+                            KLambda
+                                {kl_arg = Just (Binding fnTmpName fnTy), kl_body = createRecordE}
                       }
         convertExpr (Literal val lifetime cont) = do
             k <- convertKTerm cont

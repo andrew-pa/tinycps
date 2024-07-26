@@ -83,12 +83,14 @@ data LiteralValue
     = LiInt Int
     | LiRecord (Map.Map T.Text UTerm)
     | ULambda Lambda
+    | TopLevelRef Symbol
     deriving (Eq)
 
 instance Show LiteralValue where
     show (LiInt i) = show i
     show (LiRecord rec) = "{ " ++ intercalate ", " (map showPair (Map.toList rec)) ++ " }"
     show (ULambda lambda) = show lambda
+    show (TopLevelRef s) = "mod:" ++ show s
 
 data Expr
     = UCall
@@ -179,15 +181,15 @@ freeVariables Lambda {l_args, l_cont, l_body} = runReader (freeInExpr l_body) (a
                  then Set.empty
                  else Set.singleton v)
     freeInLiteral (LiInt _) = return Set.empty
+    freeInLiteral (TopLevelRef _) = return Set.empty
     freeInLiteral (LiRecord fields) = mapM freeInUTerm fields <&> Set.unions
     freeInLiteral (ULambda Lambda {l_args, l_cont, l_body}) =
         local (Set.union $ argsToSet l_args) (freeInExpr l_body)
 
 -- TODO: perhaps the preprocess step should have its own module?
-type PreprocessM a = ReaderT (Map.Map T.Text Int, Map.Map Ir.Symbol UType) (State Int) a
+type PreprocessEnv = (Map.Map T.Text Int, Map.Map Ir.Symbol UType, Map.Map Ir.Symbol UType)
 
-runPreprocess :: PreprocessM a -> a
-runPreprocess m = evalState (runReaderT m (Map.empty, Map.empty)) 0
+type PreprocessM a = ReaderT PreprocessEnv (State Int) a
 
 uniqueSym :: Monad m => T.Text -> (StateT Int m) Symbol
 uniqueSym t = Symbol t <$> incrSymCounter
@@ -197,7 +199,7 @@ nextTempVar = lift $ uniqueSym "tmp"
 
 convertSym :: Ir.Symbol -> PreprocessM Symbol
 convertSym (Ir.Symbol s) = do
-    i <- reader $ Map.lookup s . fst
+    i <- reader $ Map.lookup s . (\(a, _, _) -> a)
     j <- get
     return (Symbol s (fromMaybe j i))
 
@@ -209,18 +211,20 @@ convertBinding (Ir.Binding name ty) = do
 inNewScope :: Maybe (Binding KType) -> [Binding UType] -> PreprocessM a -> PreprocessM a
 inNewScope k_binding u_bindings m = lift incrSymCounter >> local updateEnv m
   where
-    addBindingU (Binding (Symbol n i) t) (ei, et) =
-        (Map.insert n i ei, Map.insert (Ir.Symbol n) t et)
-    addBindingK (Binding (Symbol n i) _) (ei, et) = (Map.insert n i ei, et)
+    addBindingU (Binding (Symbol n i) t) (ei, et, tl) =
+        (Map.insert n i ei, Map.insert (Ir.Symbol n) t et, tl)
+    addBindingK (Binding (Symbol n i) _) (ei, et, tl) = (Map.insert n i ei, et, tl)
     updateEnv env = foldr addBindingU (foldr addBindingK env (maybeToList k_binding)) u_bindings
 
-preprocess :: Ir.Module -> PreprocessM Module
+preprocess :: Ir.Module -> State Int Module
 preprocessLambda :: Ir.Lambda -> PreprocessM Lambda
 preprocessExpr :: Ir.Expr -> PreprocessM Expr
 preprocessUTerm :: Ir.UTerm -> (UTerm -> PreprocessM Expr) -> PreprocessM Expr
 preprocessKTerm :: Ir.KTerm -> PreprocessM KTerm
-preprocess (Ir.Module funcs) = mapM processTopLevel (Map.toList funcs) <&> (Module . Map.fromList)
+preprocess (Ir.Module funcs) =
+    runReaderT process (Map.empty, Map.empty, Map.map Ir.lambdaType funcs)
   where
+    process = mapM processTopLevel (Map.toList funcs) <&> (Module . Map.fromList)
     processTopLevel (n, f) = do
         nn <- convertSym n
         pf <- preprocessLambda f
@@ -238,14 +242,33 @@ preprocessKTerm (Ir.KLambda kl_arg kl_body) = do
     body <- inNewScope Nothing (maybeToList arg) $ preprocessExpr kl_body
     return KLambda {kl_arg = arg, kl_body = body}
 
-preprocessUTerm (Ir.UVar v) k = convertSym v >>= k . UVar
+lookupType :: Ir.Symbol -> PreprocessEnv -> UType
+lookupType s (_, et, _) = et ! s
+
+preprocessUTerm (Ir.UVar v@(Ir.Symbol vtxt)) k = do
+    isTopLevel <- reader (\(_, _, tl) -> Map.lookup v tl)
+    case isTopLevel of
+        Just topLevelDefType -> do
+            tmpVar <- nextTempVar
+            innerNext <- k (UVar tmpVar)
+            return
+                $ Literal
+                      { lt_val = TopLevelRef $ Symbol vtxt 0
+                      , lt_lifetime = Immediate
+                      , lt_cont =
+                            KLambda
+                                { kl_arg = Just (Binding tmpVar topLevelDefType)
+                                , kl_body = innerNext
+                                }
+                      }
+        Nothing -> convertSym v >>= k . UVar
 preprocessUTerm ut@(Ir.LiRecord record_fields) k = buildExpr (Map.toList record_fields) []
   where
     buildExpr :: [(T.Text, Ir.UTerm)] -> [(T.Text, UTerm)] -> PreprocessM Expr
     buildExpr [] resFields = do
         tmpVar <- nextTempVar
         innerNext <- k (UVar tmpVar)
-        ty <- Ir.utermType (\s e -> snd e ! s) ut
+        ty <- Ir.utermType lookupType ut
         return
             $ Literal
                   { lt_val = LiRecord $ Map.fromList resFields
@@ -257,7 +280,7 @@ preprocessUTerm ut@(Ir.LiRecord record_fields) k = buildExpr (Map.toList record_
 preprocessUTerm ut k = do
     tmpVar <- nextTempVar
     inner <- k (UVar tmpVar)
-    ty <- Ir.utermType (\s e -> snd e ! s) ut
+    ty <- Ir.utermType lookupType ut
     (val, lifetime) <-
         case ut of
             (Ir.LiInt i) -> return (LiInt i, Immediate)

@@ -2,14 +2,14 @@
 
 module Main where
 
+import ClosureConversion
+import CodeGen
 import Control.Monad.State
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import Ir
 import qualified XIr
-import ClosureConversion
-import CodeGen
-import qualified Data.Set as Set
 
 -- register spilling
 -- abstract instruction generation
@@ -48,23 +48,26 @@ exMod = Module {m_funcs = Map.fromList [(Symbol "baz", bazDef)]}
             }
 
 exModX :: XIr.Module
-exModX = XIr.runPreprocess $ XIr.preprocess exMod
+exModX = evalState (XIr.preprocess exMod) 0
 
 cloCovMod :: XIr.Module
 cloCovMod = evalState (convertClosures exModX) 1
 
 testMachine :: MachineDesc
-testMachine = MachineDesc {
-    argumentRegisters=[Reg x | x <- [1..15]],
-    returnRegister=Reg 0,
-    argumentVariableAssignment= \names -> VarAssign
-        (Map.fromList $ zip names [Reg x | x <- [1..15]])
-        (Set.fromList $ Reg 0 : [Reg x | x <- [(length names)..15]]),
-    numRegisters=16
-}
+testMachine =
+    MachineDesc
+        { argumentRegisters = [Reg x | x <- [1 .. 15]]
+        , returnRegister = Reg 0
+        , argumentVariableAssignment =
+              \bindings ->
+                  VarAssign
+                      (Map.fromList $ zip (map XIr.bindingName bindings) [Reg x | x <- [1 .. 15]])
+                      (Set.fromList $ Reg 0 : [Reg x | x <- [(length bindings) .. 15]])
+        , numRegisters = 16
+        }
 
--- genMod :: Map.Map Symbol [Instr]
--- genMod = codeGen testMachine cloCovMod
+genMod :: Map.Map XIr.Symbol [Instr]
+genMod = codeGen cloCovMod testMachine
 
 main :: IO ()
 main = putStrLn "Hello, Haskell!"
