@@ -93,6 +93,7 @@ data Instr
     | Return
     | LoadField Register Int Register
     | StoreField Register Int Register
+    | CopyField Register Int Register Int
     | LoadImm Register Int
     | CreateRecord Register Int
     | Move Register Register
@@ -207,16 +208,27 @@ codeGenExpr UCall {uc_func, uc_args, uc_cont} = do
 codeGenExpr Literal {lt_val = LiInt v, lt_cont} = codeGenKTermK lt_cont $ \r -> tell [LoadImm r v]
 codeGenExpr Literal {lt_val = ULambda _} = error "must closure convert prior to codegen"
 codeGenExpr Literal {lt_val = LiRecord fields, lt_cont} = do
-    recordTy <- mapM (\t -> reader (! utermAsSymbol t)) fields
+    recordTy <- mapM typeOfLRV fields
     fieldRegs <- mapM (codeGenField $ fieldOffsetForRecord $ TyRecord recordTy) (Map.toList fields)
     size <- recordSize recordTy
-    codeGenKTermK lt_cont $ \r ->
-        tell $ CreateRecord r size : map (uncurry (StoreField r)) fieldRegs
+    codeGenKTermK lt_cont $ \r -> tell $ CreateRecord r size : map ($ r) fieldRegs
   where
+    typeOfLRV (LRVUTerm t) = reader (! utermAsSymbol t)
+    typeOfLRV (LRVSelect r f) = reader $ selectType . (! utermAsSymbol r)
+      where
+        selectType (TyRecord thefields) = thefields ! f
+        selectType _ = error "cannot select from non-record type"
     codeGenField fieldOffset (fieldName, fieldTerm) = do
-        offset <- fieldOffset fieldName
-        reg <- codeGenUTerm fieldTerm
-        return (offset, reg)
+        dstOffset <- fieldOffset fieldName
+        case fieldTerm of
+            LRVUTerm t -> do
+                reg <- codeGenUTerm t
+                return $ \dst -> StoreField dst dstOffset reg
+            LRVSelect srcRecord srcField -> do
+                src <- codeGenUTerm srcRecord
+                srcType <- reader (! utermAsSymbol srcRecord)
+                srcOffset <- fieldOffsetForRecord srcType srcField
+                return $ \dst -> CopyField dst dstOffset src srcOffset
 codeGenExpr Literal {lt_val = TopLevelRef n, lt_cont} =
     codeGenKTermK lt_cont $ \r -> tell [LoadAddressOf n r]
 codeGenExpr KCall {kc_arg, kc_cont} = do

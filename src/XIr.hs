@@ -4,6 +4,7 @@ module XIr where
 
 import Control.Monad.Reader
 import Control.Monad.State
+import Data.Containers.ListUtils (nubOrd)
 import Data.Functor ((<&>))
 import Data.List (intercalate)
 import qualified Data.Map as Map
@@ -21,6 +22,9 @@ data Symbol =
 
 instance Show Symbol where
     show (Symbol text int) = T.unpack text ++ show int
+
+symToText :: Symbol -> T.Text
+symToText (Symbol name index) = T.concat [name, T.pack (show index)]
 
 data Binding ty = Binding
     { bindingName :: Symbol
@@ -72,6 +76,10 @@ instance Show KTerm where
     show (KLambda (Just arg) body) = "κ" ++ show arg ++ " {" ++ show body ++ "}"
     show (KLambda Nothing body) = "κ {" ++ show body ++ "}"
 
+boundSymbol :: KTerm -> Maybe Symbol
+boundSymbol KLambda {kl_arg = Just (Binding name _)} = Just name
+boundSymbol _ = Nothing
+
 data Lifetime
     = Unknown
     | Immediate
@@ -79,9 +87,22 @@ data Lifetime
     | Heap
     deriving (Eq, Show)
 
+data LiteralRecordValue
+    = LRVUTerm UTerm
+    | LRVSelect UTerm T.Text
+    deriving (Eq)
+
+instance Show LiteralRecordValue where
+    show (LRVUTerm t) = show t
+    show (LRVSelect r f) = show r ++ "." ++ show f
+
+litRecValAsUTerm :: LiteralRecordValue -> UTerm
+litRecValAsUTerm (LRVUTerm t) = t
+litRecValAsUTerm (LRVSelect r _) = r
+
 data LiteralValue
     = LiInt Int
-    | LiRecord (Map.Map T.Text UTerm)
+    | LiRecord (Map.Map T.Text LiteralRecordValue)
     | ULambda Lambda
     | TopLevelRef Symbol
     deriving (Eq)
@@ -118,6 +139,33 @@ data Expr
           , if_alt :: KTerm
           }
     deriving (Eq)
+
+-- uterm variables used as operands of the root expression
+exprOperands :: Expr -> Set.Set Symbol
+exprOperands UCall {uc_func, uc_args} = Set.fromList $ map utermAsSymbol $ uc_func : uc_args
+exprOperands Literal {lt_val = LiRecord fields} =
+    Set.fromList $ map (utermAsSymbol . litRecValAsUTerm . snd) $ Map.toList fields
+exprOperands Literal {lt_val = ULambda lam} = freeVariables lam
+exprOperands Literal {lt_val = TopLevelRef r} = Set.singleton r
+exprOperands Literal {} = Set.empty
+exprOperands KCall {kc_arg} = Set.singleton $ utermAsSymbol kc_arg
+exprOperands Select {sl_record} = Set.singleton $ utermAsSymbol sl_record
+exprOperands If {if_test} = Set.singleton $ utermAsSymbol if_test
+
+-- continuation terms in an expression
+exprContinuations :: Expr -> [KTerm]
+exprContinuations UCall {uc_cont} = [uc_cont]
+exprContinuations Literal {lt_cont} = [lt_cont]
+exprContinuations KCall {kc_cont} = [kc_cont]
+exprContinuations Select {sl_cont} = [sl_cont]
+exprContinuations If {if_csq, if_alt} = [if_csq, if_alt]
+
+variablesByFirstOccurenceInExpr :: Expr -> [Symbol]
+variablesByFirstOccurenceInExpr = nubOrd . runE
+  where
+    runE e = Set.toList (exprOperands e) ++ concatMap runKT (exprContinuations e)
+    runKT KLambda {kl_body} = runE kl_body
+    runKT _ = []
 
 instance Show Expr where
     show (UCall func args cont) =
@@ -166,25 +214,33 @@ collectOverTerms inUTerm inKTerm inLiteral e =
 
 freeVariables :: Lambda -> Set.Set Symbol
 freeVariables Lambda {l_args, l_cont, l_body} = runReader (freeInExpr l_body) (argsToSet l_args)
-  where
-    argsToSet = Set.fromList . map bindingName
-    freeInExpr = collectOverTerms freeInUTerm freeInKTerm freeInLiteral
-    freeInKTerm (KVar _) = return Set.empty
-    freeInKTerm KLambda {kl_arg = Just argName, kl_body} =
-        local (Set.insert (bindingName argName)) (freeInExpr kl_body)
-    freeInKTerm KLambda {kl_arg = Nothing, kl_body} = freeInExpr kl_body
-    freeInUTerm :: UTerm -> Reader (Set.Set Symbol) (Set.Set Symbol)
-    freeInUTerm (UVar v) = do
-        bound <- reader $ Set.member v
-        return
-            (if bound
-                 then Set.empty
-                 else Set.singleton v)
-    freeInLiteral (LiInt _) = return Set.empty
-    freeInLiteral (TopLevelRef _) = return Set.empty
-    freeInLiteral (LiRecord fields) = mapM freeInUTerm fields <&> Set.unions
-    freeInLiteral (ULambda Lambda {l_args, l_cont, l_body}) =
-        local (Set.union $ argsToSet l_args) (freeInExpr l_body)
+
+argsToSet :: [Binding ty] -> Set.Set Symbol
+argsToSet = Set.fromList . map bindingName
+
+freeInExpr :: Expr -> Reader (Set.Set Symbol) (Set.Set Symbol)
+freeInExpr = collectOverTerms freeInUTerm freeInKTerm freeInLiteral
+
+freeInKTerm :: KTerm -> Reader (Set.Set Symbol) (Set.Set Symbol)
+freeInKTerm (KVar _) = return Set.empty
+freeInKTerm KLambda {kl_arg = Just argName, kl_body} =
+    local (Set.insert (bindingName argName)) (freeInExpr kl_body)
+freeInKTerm KLambda {kl_arg = Nothing, kl_body} = freeInExpr kl_body
+
+freeInUTerm :: UTerm -> Reader (Set.Set Symbol) (Set.Set Symbol)
+freeInUTerm (UVar v) = do
+    bound <- reader $ Set.member v
+    return
+        (if bound
+             then Set.empty
+             else Set.singleton v)
+
+freeInLiteral :: LiteralValue -> Reader (Set.Set Symbol) (Set.Set Symbol)
+freeInLiteral (LiInt _) = return Set.empty
+freeInLiteral (TopLevelRef _) = return Set.empty
+freeInLiteral (LiRecord fields) = mapM (freeInUTerm . litRecValAsUTerm) fields <&> Set.unions
+freeInLiteral (ULambda Lambda {l_args, l_cont, l_body}) =
+    local (Set.union $ argsToSet l_args) (freeInExpr l_body)
 
 -- TODO: perhaps the preprocess step should have its own module?
 type PreprocessEnv = (Map.Map T.Text Int, Map.Map Ir.Symbol UType, Map.Map Ir.Symbol UType)
@@ -264,7 +320,7 @@ preprocessUTerm (Ir.UVar v@(Ir.Symbol vtxt)) k = do
         Nothing -> convertSym v >>= k . UVar
 preprocessUTerm ut@(Ir.LiRecord record_fields) k = buildExpr (Map.toList record_fields) []
   where
-    buildExpr :: [(T.Text, Ir.UTerm)] -> [(T.Text, UTerm)] -> PreprocessM Expr
+    buildExpr :: [(T.Text, Ir.UTerm)] -> [(T.Text, LiteralRecordValue)] -> PreprocessM Expr
     buildExpr [] resFields = do
         tmpVar <- nextTempVar
         innerNext <- k (UVar tmpVar)
@@ -276,7 +332,7 @@ preprocessUTerm ut@(Ir.LiRecord record_fields) k = buildExpr (Map.toList record_
                   , lt_cont = KLambda {kl_arg = Just (Binding tmpVar ty), kl_body = innerNext}
                   }
     buildExpr ((name, value):fields) resFields =
-        preprocessUTerm value $ \cv -> buildExpr fields ((name, cv) : resFields)
+        preprocessUTerm value $ \cv -> buildExpr fields ((name, LRVUTerm cv) : resFields)
 preprocessUTerm ut k = do
     tmpVar <- nextTempVar
     inner <- k (UVar tmpVar)

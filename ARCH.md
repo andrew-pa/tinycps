@@ -19,7 +19,8 @@
     This phase makes sure that if a function has more arguments than available registers to pass arguments then the rest of the arguments are passed via a record (ie on the stack).
 
 - Variable spill phase: closure converted xCPS → closure converted xCPS
-    In this phase, the invariant that the number of bindings active at any point in a function is less than or equal to the number of machine registers. This is accomplished by introducing a "spill record" which stores the remaining variables, if any. Only one record is maintained in any function.
+    In this phase, the invariant is introduced that the number of bindings active at any point in a function is less than or equal to the number of machine registers. This is accomplished by introducing a "spill record" which stores the remaining variables, if any. Only one record is maintained in any function.
+    In this phase we assume that all functions have a number of arguments less than or equal to the number of registers, and that all function calls have also been adjusted in this manner.
 
 - Code generation phase: closure converted, expanded CPS → abstract instructions
     The codegen phase converts the continuation based control flow into a linear sequence of abstract instructions. It also assigns variables to registers, and implements the calling convention for the target architecture.

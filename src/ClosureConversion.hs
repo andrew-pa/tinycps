@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
 
 module ClosureConversion where
 
@@ -76,8 +75,9 @@ convertClosures m = do
             newLam <- convertLambda freeVars lam
             tell $ Map.singleton fnName newLam
             let record =
-                    (fnFieldName, UVar fnTmpName)
-                        : map (\v@(Symbol vName _) -> (vName, UVar v)) (Set.toList freeVars)
+                    (fnFieldName, LRVUTerm $ UVar fnTmpName)
+                        : map (\v@(Symbol vName _) -> (vName, LRVUTerm $ UVar v))
+                              (Set.toList freeVars)
             let fnTy = lambdaType lam
             k <- convertKTerm cont
             let createRecordE =

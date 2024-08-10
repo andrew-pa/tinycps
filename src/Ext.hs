@@ -40,3 +40,9 @@ incrSymCounter = do
     i <- get
     put $ i + 1
     return i
+
+splitRelation :: Ord a => [(a, (b, c))] -> (Map.Map a b, Map.Map a c)
+splitRelation xs = (Map.fromList bs, Map.fromList cs)
+  where
+    bs = [(a, b) | (a, (b, _)) <- xs]
+    cs = [(a, c) | (a, (_, c)) <- xs]
