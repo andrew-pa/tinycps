@@ -23,6 +23,9 @@ data Symbol =
 instance Show Symbol where
     show (Symbol text int) = T.unpack text ++ show int
 
+symbolName :: Symbol -> T.Text
+symbolName (Symbol name _) = name
+
 symToText :: Symbol -> T.Text
 symToText (Symbol name index) = T.concat [name, T.pack (show index)]
 
@@ -146,7 +149,7 @@ exprOperands UCall {uc_func, uc_args} = Set.fromList $ map utermAsSymbol $ uc_fu
 exprOperands Literal {lt_val = LiRecord fields} =
     Set.fromList $ map (utermAsSymbol . litRecValAsUTerm . snd) $ Map.toList fields
 exprOperands Literal {lt_val = ULambda lam} = freeVariables lam
-exprOperands Literal {lt_val = TopLevelRef r} = Set.singleton r
+exprOperands Literal {lt_val = TopLevelRef _} = Set.empty
 exprOperands Literal {} = Set.empty
 exprOperands KCall {kc_arg} = Set.singleton $ utermAsSymbol kc_arg
 exprOperands Select {sl_record} = Set.singleton $ utermAsSymbol sl_record
@@ -166,6 +169,36 @@ variablesByFirstOccurenceInExpr = nubOrd . runE
     runE e = Set.toList (exprOperands e) ++ concatMap runKT (exprContinuations e)
     runKT KLambda {kl_body} = runE kl_body
     runKT _ = []
+
+transformContBody ::
+       Monad m
+    => (Expr -> ReaderT (Map.Map Symbol UType) m Expr)
+    -> KTerm
+    -> ReaderT (Map.Map Symbol UType) m KTerm
+transformContBody f (KLambda {kl_arg, kl_body}) = do
+    body <- local (maybe id (\(Binding n t) -> Map.insert n t) kl_arg) $ f kl_body
+    return KLambda {kl_arg = kl_arg, kl_body = body}
+transformContBody _ k = return k
+
+mapOverContinuationBodies ::
+       Monad m
+    => Expr
+    -> (Expr -> ReaderT (Map.Map Symbol UType) m Expr)
+    -> ReaderT (Map.Map Symbol UType) m Expr
+mapOverContinuationBodies UCall {uc_func, uc_args, uc_cont} f =
+    transformContBody f uc_cont <&> \c -> UCall {uc_func = uc_func, uc_args = uc_args, uc_cont = c}
+mapOverContinuationBodies KCall {kc_cont, kc_arg} f =
+    transformContBody f kc_cont <&> \c -> KCall {kc_cont = c, kc_arg = kc_arg}
+mapOverContinuationBodies Literal {lt_val, lt_lifetime, lt_cont} f =
+    transformContBody f lt_cont <&> \c ->
+        Literal {lt_val = lt_val, lt_lifetime = lt_lifetime, lt_cont = c}
+mapOverContinuationBodies Select {sl_field, sl_record, sl_cont} f =
+    transformContBody f sl_cont <&> \c ->
+        Select {sl_field = sl_field, sl_record = sl_record, sl_cont = c}
+mapOverContinuationBodies If {if_test, if_csq, if_alt} f = do
+    csq <- transformContBody f if_csq
+    alt <- transformContBody f if_alt
+    return If {if_test = if_test, if_csq = csq, if_alt = alt}
 
 instance Show Expr where
     show (UCall func args cont) =
@@ -241,6 +274,40 @@ freeInLiteral (TopLevelRef _) = return Set.empty
 freeInLiteral (LiRecord fields) = mapM (freeInUTerm . litRecValAsUTerm) fields <&> Set.unions
 freeInLiteral (ULambda Lambda {l_args, l_cont, l_body}) =
     local (Set.union $ argsToSet l_args) (freeInExpr l_body)
+
+subst :: Map.Map Symbol UTerm -> Expr -> Expr
+subst subMap expr =
+    case expr of
+        UCall func args cont -> UCall (substUTerm func) (map substUTerm args) (substKTerm cont)
+        Literal val lifetime cont -> Literal (substLiteral val) lifetime (substKTerm cont)
+        KCall cont arg -> KCall (substKTerm cont) (substUTerm arg)
+        Select field record cont -> Select field (substUTerm record) (substKTerm cont)
+        If test csq alt -> If (substUTerm test) (substKTerm csq) (substKTerm alt)
+  where
+    -- Substitute UTerm using the substitution map
+    substUTerm :: UTerm -> UTerm
+    substUTerm uvar@(UVar sym) = Map.findWithDefault uvar sym subMap
+    -- Substitute in KTerm
+    substKTerm :: KTerm -> KTerm
+    substKTerm (KVar sym) = KVar sym
+    substKTerm (KLambda arg body) = KLambda (fmap substBinding arg) (subst subMap body)
+    -- Substitute in Binding
+    substBinding :: Binding ty -> Binding ty
+    substBinding (Binding name ty) = Binding name ty
+    -- Substitute in LiteralValue
+    substLiteral :: LiteralValue -> LiteralValue
+    substLiteral (LiInt i) = LiInt i
+    substLiteral (LiRecord rec) = LiRecord (Map.map substLiteralRecordValue rec)
+    substLiteral (ULambda lambda) = ULambda (substLambda lambda)
+    substLiteral (TopLevelRef s) = TopLevelRef s
+    -- Substitute in LiteralRecordValue
+    substLiteralRecordValue :: LiteralRecordValue -> LiteralRecordValue
+    substLiteralRecordValue (LRVUTerm t) = LRVUTerm (substUTerm t)
+    substLiteralRecordValue (LRVSelect r f) = LRVSelect (substUTerm r) f
+    -- Substitute in Lambda
+    substLambda :: Lambda -> Lambda
+    substLambda (Lambda args cont body) =
+        Lambda (map substBinding args) (substBinding cont) (subst subMap body)
 
 -- TODO: perhaps the preprocess step should have its own module?
 type PreprocessEnv = (Map.Map T.Text Int, Map.Map Ir.Symbol UType, Map.Map Ir.Symbol UType)
